@@ -14,6 +14,7 @@ COPY --from=build /app/frontend/dist ./frontend/dist
 COPY package*.json ./
 COPY shared ./shared
 COPY backend ./backend
+RUN chmod -R a+rX /app
 USER node
 EXPOSE 3000
 CMD ["node", "backend/src/server.js"]
