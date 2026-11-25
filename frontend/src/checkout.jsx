@@ -386,7 +386,7 @@ function CheckoutContent({ store, payment, user, order }) {
           </div>
         </div>
       </div>
-      <div className="checkout-note"><span>Migração para o Itaú Checkout</span>
+      <div className="checkout-note"><span>Integração Rede Itaú</span>
         <a target="_blank" rel="noreferrer" href={payment.announcement}>Comunicado da Rede <ArrowUpRight size={13} /></a></div>
     </main>
     <Footer store={store} />

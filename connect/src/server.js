@@ -1,9 +1,13 @@
+import { openPool } from '../../backend/src/db.js';
 import { buildConnect, loadConnectConfig } from './app.js';
 
 let app;
 try {
   const config = await loadConnectConfig();
-  app = buildConnect(config, { logger: true });
+  const db = config.databaseUrl ? openPool(config.databaseUrl) : null;
+  db?.on('error', () => console.error('Conexão ociosa do cofre e.Rede interrompida.'));
+  app = buildConnect(config, { logger: true, db });
+  if (db) app.addHook('onClose', () => db.end());
   await app.listen({ port: config.port, host: config.host });
   const stop = () => { void app.close(); };
   process.once('SIGINT', stop);

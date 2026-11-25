@@ -1,6 +1,7 @@
 import Fastify, { LogController } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { registerRede } from './rede.js';
 import { measureEgress, NetworkError, probeUrl } from './network.js';
 
 export function connectToken(value) {
@@ -20,12 +21,17 @@ export async function loadConnectConfig(env = process.env) {
     throw new Error('Configure TLS para expor o Connect fora da máquina.');
   }
   const https = certFile ? { cert: await readFile(certFile), key: await readFile(keyFile), minVersion: 'TLSv1.2' } : undefined;
-  return { port, host, https, token: env.CONNECT_TOKEN, egressUrl: probeUrl(env.EGRESS_PROBE_URL) };
+  const databaseUrl = env.CONNECT_REDE_KEY ? env.CONNECT_DATABASE_URL : null;
+  const redeKey = env.CONNECT_REDE_KEY ? Buffer.from(env.CONNECT_REDE_KEY, 'base64') : null;
+  if (redeKey && (redeKey.length !== 32 || !databaseUrl)) {
+    throw new Error('Configure CONNECT_REDE_KEY com 32 bytes em Base64 e CONNECT_DATABASE_URL.');
+  }
+  return { port, host, https, databaseUrl, redeKey, token: env.CONNECT_TOKEN, egressUrl: probeUrl(env.EGRESS_PROBE_URL) };
 }
 
-export function buildConnect(config, { fetcher = fetch, logger = false } = {}) {
+export function buildConnect(config, { fetcher = fetch, logger = false, db } = {}) {
   const app = Fastify({
-    logger, https: config.https, bodyLimit: 1024,
+    logger, https: config.https, bodyLimit: 8192,
     logController: new LogController({ disableRequestLogging: true }),
   });
   const expected = Buffer.from('Bearer ' + config.token);
@@ -42,7 +48,7 @@ export function buildConnect(config, { fetcher = fetch, logger = false } = {}) {
       .send({ code: 'CONNECT_REQUEST' });
   });
   app.get('/v1/health', async () => ({ service: 'cs-rede-connect', status: 'ok', version: 1,
-    probeConfigured: Boolean(config.egressUrl) }));
+    probeConfigured: Boolean(config.egressUrl), redeConfigured: Boolean(db && config.redeKey) }));
 
   let pending;
   let previous;
@@ -59,5 +65,6 @@ export function buildConnect(config, { fetcher = fetch, logger = false } = {}) {
         .send({ code: error.code, httpStatus: error.status ?? null });
     }
   });
+  if (db && config.redeKey) registerRede(app, db, config.redeKey, fetcher);
   return app;
 }

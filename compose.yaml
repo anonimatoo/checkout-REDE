@@ -52,8 +52,13 @@ services:
       CONNECT_PORT: 3400
       CONNECT_PRIVATE_HTTP: "true"
       CONNECT_TOKEN: ${CONNECT_TOKEN:-}
+      CONNECT_REDE_KEY: ${CONNECT_REDE_KEY:-}
+      CONNECT_DATABASE_URL: postgres://csrede:${POSTGRES_PASSWORD:?Configure POSTGRES_PASSWORD}@db:5432/csrede
       EGRESS_PROBE_URL: ${EGRESS_PROBE_URL:-}
-    networks: [integration]
+    networks: [integration, database]
+    depends_on:
+      app:
+        condition: service_healthy
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
 

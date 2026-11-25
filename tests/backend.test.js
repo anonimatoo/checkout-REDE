@@ -100,6 +100,10 @@ test('autenticação, idempotência de pedidos, filtros, exportações e cancela
   const strings = cells['xl/sharedStrings.xml'] ? strFromU8(cells['xl/sharedStrings.xml']) : sheet;
   assert.match(strings, /=2\+3/);
   assert.doesNotMatch(sheet, /<f[\s>]/);
+  const byId = await app.inject({ url: '/api/admin/pedidos?id=' + first.id, headers: { cookie } });
+  assert.equal(byId.json().orders[0].id, first.id);
+  const byReference = await app.inject({ url: '/api/admin/pedidos?id=' + encodeURIComponent(first.reference), headers: { cookie } });
+  assert.equal(byReference.json().orders[0].id, first.id);
   const invalidRange = await app.inject({ url: '/api/admin/pedidos?min=2&max=1', headers: { cookie } });
   assert.equal(invalidRange.statusCode, 400);
   const excluded = await app.inject({ url: '/api/admin/pedidos?max=259899', headers: { cookie } });
@@ -224,4 +228,107 @@ test('checkout consulta o processo Connect e audita mudança de saída com Postg
   assert.ok(diagnosis.json().tests.some(check => check.name === 'Comparação do CIDR' && check.status === 'Falhou'));
   assert.ok(diagnosis.json().tests.some(check => check.code === 'PROVIDER_ONBOARDING'));
   assert.ok(!diagnosis.body.includes(connectSecret));
+});
+
+test('Connect valida e cifra credenciais e concilia Pix Sandbox uma vez por operação', databaseRequired, async t => {
+  const connectSecret = token();
+  const secret = 'sandbox-teste-que-nao-pode-vazar';
+  let database, reference, cents;
+  let state = 'Pending', sends = 0, refunds = 0, timeout = false;
+  const tid = '40402611250909140013';
+  const connector = buildConnect({ token: connectSecret, redeKey: randomBytes(32) }, {
+    db: { query: (...args) => database.query(...args) },
+    fetcher: async (url, options) => {
+      const json = (object, status = 200) => Response.json(object, { status });
+      const target = new URL(url);
+      if (target.pathname.endsWith('/oauth2/token')) {
+        const sandbox = target.hostname === 'rl7-sandbox-api.useredecloud.com.br';
+        assert.equal(options.body, 'grant_type=client_credentials');
+        assert.equal(options.method, 'POST');
+        const expected = Buffer.from(sandbox ? 'pv-sandbox:' + secret : 'pv-production:producao-isolada').toString('base64');
+        if (options.headers.authorization !== 'Basic ' + expected) return json({ error: 'invalid_client' }, 401);
+        return json({ access_token: sandbox ? 'access-sandbox' : 'access-production', token_type: 'Bearer' });
+      }
+      assert.equal(target.origin, 'https://sandbox-erede.useredecloud.com.br');
+      assert.equal(options.headers.authorization, 'Bearer access-sandbox');
+      if (options.method === 'POST' && target.pathname === '/v2/transactions') {
+        sends++;
+        const input = JSON.parse(options.body);
+        reference = input.reference;
+        cents = input.amount;
+        assert.equal(input.kind, 'pix');
+        assert.match(input.qrCode.dateTimeExpiration, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/);
+        if (timeout) throw new DOMException('Fixture de timeout', 'TimeoutError');
+        return json({ reference, amount: cents, tid, returnCode: '00', qrCodeResponse: { qrCodeData: '000201010212fixture' } });
+      }
+      if (options.method === 'GET') {
+        assert.equal(target.searchParams.get('reference'), reference);
+        const entry = { reference, tid, kind: 'Pix', amount: cents, returnCode: '00', status: state };
+        return state === 'Pending' ? json({ qrCodeResponse: entry }) : json({
+          authorization: entry, capture: { amount: cents },
+          ...(state === 'Canceled' ? { refunds: [{ status: 'Done', amount: cents }] } : {}),
+        });
+      }
+      assert.equal(target.pathname, '/v2/transactions/' + tid + '/refunds');
+      assert.deepEqual(JSON.parse(options.body), { amount: cents });
+      refunds++;
+      state = 'Canceled';
+      return json({ returnCode: '359' });
+    },
+  });
+  t.after(() => connector.close());
+  const connectUrl = await connector.listen({ host: '127.0.0.1', port: 0 });
+  const { app, db, config } = await testApp(t, { CONNECT_URL: connectUrl, CONNECT_TOKEN: connectSecret });
+  database = db;
+  const email = 'rede@example.org', password = 'senha de teste equipe financeira';
+  await db.query('INSERT INTO administrators (id, singleton, email, password_hash) VALUES ($1,true,$2,$3)',
+    [randomUUID(), email, await hashPassword(password)]);
+  const origin = { origin: config.origin };
+  const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: origin, payload: { email, password } });
+  const signed = { ...origin, cookie: login.headers['set-cookie'].split(';')[0], 'x-csrf-token': login.json().user.csrf };
+  const send = (method, path, payload, headers = signed) => app.inject({ method, url: '/api/admin/' + path, headers, payload });
+
+  assert.equal((await send('GET', 'rede/sandbox', undefined, origin)).statusCode, 401);
+  const saved = await send('PUT', 'rede/sandbox', { clientId: 'pv-sandbox', clientSecret: secret });
+  assert.equal(saved.statusCode, 200, saved.body);
+  assert.match(saved.json().account, /••••dbox/);
+  assert.ok(!saved.body.includes(secret));
+  const { rows: [stored] } = await db.query("SELECT encrypted FROM rede_credentials WHERE environment='sandbox'");
+  assert.ok(stored.encrypted.length > secret.length && !stored.encrypted.includes(secret));
+  const bad = await send('PUT', 'rede/sandbox', { clientId: 'pv-sandbox', clientSecret: 'errado' });
+  assert.equal(bad.statusCode, 502, bad.body);
+  assert.equal(bad.json().upstreamStatus, 401);
+  assert.equal((await send('POST', 'rede/sandbox/testar')).statusCode, 200);
+  assert.equal((await send('GET', 'rede/production')).json().configured, false);
+  assert.equal((await send('PUT', 'rede/production', { clientId: 'pv-production', clientSecret: 'producao-isolada' })).statusCode, 200);
+  const live = await connector.inject({ method: 'POST', url: '/v1/rede/production/pix/create',
+    headers: { authorization: 'Bearer ' + connectSecret }, payload: {} });
+  assert.equal(live.statusCode, 403);
+
+  const id = randomUUID();
+  const create = (key, value = 2399) => send('POST', 'sandbox/pix', { cents: value }, { ...signed, 'idempotency-key': key });
+  const responses = await Promise.all([create(id), create(id)]);
+  assert.deepEqual(responses.map(response => response.statusCode).sort(), [200, 201], responses.map(response => response.body).join(' '));
+  assert.equal(sends, 1);
+  assert.equal(responses.find(response => response.statusCode === 201).json().state, 'pending');
+  assert.equal((await create(id, 1234)).statusCode, 409);
+  const path = 'sandbox/pix/' + id;
+  state = 'Approved';
+  const paid = await send('POST', path + '/consultar', {});
+  assert.equal(paid.json().state, 'approved', paid.body);
+  assert.equal(paid.json().qrText, null);
+  assert.equal((await send('POST', path + '/estornar', {})).statusCode, 400);
+  const refunded = await send('POST', path + '/estornar', { confirm: true });
+  assert.equal(refunded.json().refund, 'accepted', refunded.body);
+  assert.equal((await send('POST', path + '/estornar', { confirm: true })).statusCode, 409);
+  assert.equal((await send('POST', path + '/consultar', {})).json().state, 'refunded');
+  assert.equal(refunds, 1);
+  timeout = true;
+  const second = randomUUID();
+  assert.equal((await create(second)).json().state, 'uncertain');
+  assert.equal((await create(second)).json().state, 'uncertain');
+  assert.equal(sends, 2);
+  assert.equal((await send('GET', 'pedidos')).json().orders.length, 0);
+  assert.equal((await send('DELETE', 'rede/sandbox')).json().configured, false);
+  assert.equal((await send('GET', 'rede/production')).json().configured, true);
 });

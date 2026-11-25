@@ -7,6 +7,7 @@ import { extname } from 'node:path';
 import { connectClient } from './connect.js';
 import { registerAuth } from './auth.js';
 import { registerTeam } from './team.js';
+import { registerRedeRoutes } from './rede.js';
 import { registerOrders } from './orders.js';
 import { egressMonitor, registerStore } from './store.js';
 
@@ -54,6 +55,7 @@ export async function buildApp(config, pool, { logger = false, frontend = true }
   const verifyEgress = egressMonitor(pool, config, connect);
   registerStore(app, pool, config, authorization, verifyEgress, connect);
   registerOrders(app, pool, config, authorization);
+  registerRedeRoutes(app, pool, connect, authorization);
   registerTeam(app, pool, config, authorization);
   if (connect || config.egressUrl) {
     const check = () => verifyEgress().catch(() => app.log.warn('Não foi possível verificar o IP de saída.'));

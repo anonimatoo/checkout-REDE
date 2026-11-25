@@ -1,35 +1,25 @@
-FROM node:24-bookworm-slim AS dependencies
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-
-FROM dependencies AS build
-COPY frontend ./frontend
-COPY shared ./shared
-RUN npm run build
-
-FROM dependencies AS production-dependencies
-RUN npm prune --omit=dev
-
-FROM node:24-bookworm-slim AS runtime
+FROM node:24-alpine AS runtime
+RUN --mount=type=bind,source=.,target=/source,ro \
+    --mount=type=secret,id=npm_ca \
+    set -eu; \
+    if [ -s /run/secrets/npm_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca; fi; \
+    export npm_config_cache=/tmp/csrede-npm; \
+    mkdir /app; cd /app; \
+    cp /source/package.json /source/package-lock.json .; \
+    npm ci --no-audit --no-fund; \
+    cp -R /source/frontend /source/shared /source/backend /source/connect .; \
+    npm run build; \
+    npm prune --omit=dev --no-audit --no-fund; \
+    rm -rf /tmp/csrede-npm frontend/src frontend/public frontend/vite.config.js frontend/index.html; \
+    chmod -R a+rX /app
 ENV NODE_ENV=production
 WORKDIR /app
-COPY --from=production-dependencies /app/node_modules ./node_modules
-COPY package*.json ./
+USER node
 
 FROM runtime AS connect
-COPY connect ./connect
-RUN chmod -R a+rX /app
-USER node
 EXPOSE 3400
 CMD ["node", "connect/src/server.js"]
 
 FROM runtime AS checkout
-COPY --from=build /app/frontend/dist ./frontend/dist
-COPY shared ./shared
-COPY connect/src/network.js ./connect/src/network.js
-COPY backend ./backend
-RUN chmod -R a+rX /app
-USER node
 EXPOSE 3000
 CMD ["node", "backend/src/server.js"]

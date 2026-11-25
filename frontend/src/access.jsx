@@ -46,8 +46,8 @@ export function FirstAccess() {
       {status.loading ? <Loading /> : status.error ? <>
         <Message tone="error">{status.error}</Message><button className="button secondary" onClick={status.retry}>Tentar novamente</button>
       </> : initialized ? <>
-        <Message tone="ok">{done ? 'Conta criada. Entre para personalizar a loja e configurar o checkout.' : 'A instalação já está configurada.'}</Message>
-        <a className="button primary" href="/admin">Entrar no painel</a>
+        <Message tone="ok">{done ? 'Conta criada. Entre no painel para continuar a configuração.' : 'A instalação já está configurada.'}</Message>
+        <a className="button primary" href="/admin/configurar">Entrar no painel</a>
       </> : !secret ? <>
         <p>Use o link de primeiro acesso emitido na instalação. O link é individual e válido por 30 minutos.</p>
         <a className="button secondary" href="/admin">Voltar ao login</a>

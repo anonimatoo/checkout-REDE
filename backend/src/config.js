@@ -40,8 +40,8 @@ export function loadConfig(env = process.env) {
 
 export const payment = Object.freeze({
   available: false,
-  provider: 'Itaú Checkout',
-  status: 'aguardando_contrato_tecnico',
+  provider: 'e.Rede',
+  status: 'sandbox_configuravel',
   portal: 'https://developer.userede.com.br/',
   announcement: 'https://www.maxipago.com/developers/',
 });

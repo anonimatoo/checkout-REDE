@@ -4,11 +4,9 @@ Checkout web em português para uma instalação por estabelecimento. O aplicati
 
 ## Situação dos pagamentos
 
-A Rede confirmou o encerramento do **maxiPago! em 15 de outubro de 2026** e indicou o **Itaú Checkout** como sucessor. O projeto identifica o novo provedor no painel. O contrato técnico específico da API e o acesso a um projeto Sandbox são necessários para implementar e homologar a autenticação e as operações financeiras. O endereço técnico indicado no anúncio redirecionou para o Itaú Brand Portal durante a verificação.
+A Rede indicou o **Itaú Checkout** para substituir o maxiPago!, encerrado em 15 de outubro de 2026. Como a especificação desse produto ficou indisponível, a versão atual usa a documentação pública da **e.Rede** para autenticação e para o fluxo Pix Sandbox. O painel administra credenciais separadas por ambiente pelo Connect com criptografia. A cobrança pelo checkout público, cartão e produção aguardam validação comercial e técnica.
 
-O checkout mantém a cobrança bloqueada e aceita criar pedidos com valor protegido e validade. Os campos do comprador ficam no navegador e o ViaCEP consulta somente o CEP. O dashboard e as exportações apresentam pedidos. O cancelamento de link encerra o pedido local.
-
-[Comunicado oficial](https://www.maxipago.com/developers/) · [FAQ de encerramento](https://www.maxipago.com/developers/encerramento/) · [Portal do Desenvolvedor Rede](https://developer.userede.com.br/ponto-partida) · [ViaCEP](https://viacep.com.br/) · [Cálculo do CNPJ](https://www.gov.br/receitafederal/pt-br/centrais-de-conteudo/publicacoes/documentos-tecnicos/cnpj)
+[Manual do lojista](docs/lojista.md) · [Credenciais e investigação Rede](docs/rede.md) · [API interna do Connect](docs/connect-api.md) · [Segurança e recuperação](docs/seguranca.md) · [Comunicado oficial](https://www.maxipago.com/developers/)
 
 ## Executar localmente
 
@@ -47,22 +45,27 @@ A porta pública é 443. O banco e o Connect ficam em redes Docker sem portas pu
 
 ### Atualização de uma instalação existente
 
-Mantenha o `POSTGRES_PASSWORD`, o volume e o `LINK_ENCRYPTION_KEY` existentes. A inicialização aplica a migração de perfis e mantém o administrador atual como proprietário. Para habilitar o Connect na mesma máquina, acrescente estas variáveis ao `.env` e rode `docker compose up -d --build --wait`. Gere o token com `openssl rand -hex 32`.
+Mantenha o `POSTGRES_PASSWORD`, o volume e o `LINK_ENCRYPTION_KEY` existentes. A inicialização aplica a migração de perfis e mantém o administrador atual como proprietário. Para habilitar o Connect na mesma máquina, acrescente estas variáveis ao `.env` e rode `docker compose up -d --build --wait`. Gere o token com `openssl rand -hex 32` e a chave do cofre com `openssl rand -base64 32`. Preserve a chave do cofre junto ao processo de backup da instalação.
 
 ```dotenv
 COMPOSE_PROFILES=connect
 CONNECT_URL=http://connect:3400
 CONNECT_PRIVATE_HTTP=true
 CONNECT_TOKEN=SUBSTITUA_POR_TOKEN_ALEATORIO
+CONNECT_REDE_KEY=SUBSTITUA_POR_32_BYTES_EM_BASE64
 ```
 
 ### CS REDE CONNECT em host separado
 
 A imagem do Connect pode ser construída de forma independente com `docker build --target connect -t cs-rede-connect .`. Execute-a em um host com saída pública estática e use o mesmo `CONNECT_TOKEN` aleatório configurado no checkout. Configure `CONNECT_HOST=0.0.0.0`, `CONNECT_PORT=3400`, `CONNECT_TLS_CERT` e `CONNECT_TLS_KEY` para apontar para os arquivos montados de um certificado válido e sua chave. Limite o acesso de entrada à infraestrutura do checkout. No checkout, defina `CONNECT_URL` como a origem HTTPS do Connect, sem caminho. `CONNECT_PRIVATE_HTTP=true` é para o Compose local.
 
-O Connect responde às verificações autenticadas de saúde e IP. Configure `EGRESS_PROBE_URL` no Connect com um serviço HTTPS confiável que devolva somente um endereço em texto. A verificação roda ao iniciar, a cada hora e sob demanda. O painel compara o IP medido ao bloco cadastrado e registra mudanças na auditoria. Para aprovar o IP no contrato, consulte o portal da Rede e use a rota estática de saída do host ou NAT da instalação. O resultado da medição descreve a rota até o serviço de IP.
+Em outro host, configure `CONNECT_DATABASE_URL` para o banco privado desta instalação e `CONNECT_REDE_KEY` apenas no Connect. O cofre utiliza a tabela `rede_credentials` criada pela migração do backend. Use conexão PostgreSQL de rede privada e TLS e um usuário com privilégios sobre essa tabela. Garanta que o usuário do container possa ler a chave TLS montada. O Connect responde às verificações autenticadas de saúde e IP. Configure `EGRESS_PROBE_URL` no Connect com um serviço HTTPS confiável que devolva somente um endereço em texto. A verificação roda ao iniciar, a cada hora e sob demanda. O painel compara o IP medido ao bloco cadastrado e registra mudanças na auditoria. Para aprovar o IP no contrato, consulte o portal da Rede e use a rota estática de saída do host ou NAT da instalação. O resultado da medição descreve a rota até o serviço de IP.
 
 A conexão de um navegador com o checkout permanece independente da saída de rede do Connect. Em produção, o checkout exige HTTPS e usa cookies `Secure`, `HttpOnly` e `SameSite=Strict`. O Nginx substitui os cabeçalhos encaminhados pelo cliente. Preserve backups separados do PostgreSQL e da chave de links.
+
+### Frontend em hospedagem separada
+
+O build do frontend está em `frontend/dist`. Na Vercel, configure `npm run build` e esse diretório de saída. Use uma reescrita no domínio do frontend para encaminhar `/api/:path*` ao backend HTTPS, preservando método, caminho, cabeçalhos e cookies. A raiz e as rotas `/admin` e `/pedido/:token` devem servir o `index.html`. Configure `APP_ORIGIN` no backend com a origem pública do frontend. A saída da e.Rede continua no host do Connect. Esta opção ainda precisa ser validada na infraestrutura do lojista.
 
 ### Validação
 

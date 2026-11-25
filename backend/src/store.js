@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { RedeError } from '../../connect/src/rede.js';
 import { measureEgress, NetworkError } from '../../connect/src/network.js';
 import { performance } from 'node:perf_hooks';
 import { MAX_CENTS, cnpjCharacters, digits, validCnpj, validEmail } from '../../shared/format.js';
@@ -145,6 +146,30 @@ export function registerStore(app, db, config, { authRead, ownerRead, ownerWrite
     return { store: storePrivate(await getStore(db)) };
   });
 
+  app.get('/api/admin/connect', ownerRead, async () => {
+    const store = storePrivate(await getStore(db));
+    const { rows: changes } = await db.query(`
+      SELECT action, subject, created_at FROM audit_events
+      WHERE action IN ('ip_saida_alterado','ip_cadastrado_atualizado') ORDER BY id DESC LIMIT 20
+    `);
+    let status = 'Não configurado';
+    let detail = 'Configure a origem do CS REDE CONNECT.';
+    let verified = false;
+    if (connect) {
+      try {
+        const health = await connect.health();
+        status = 'Disponível';
+        detail = 'O Connect respondeu à consulta autenticada.';
+        verified = health.redeConfigured;
+      } catch (error) {
+        if (!(error instanceof NetworkError)) throw error;
+        status = 'Indisponível';
+        detail = error.message;
+      }
+    }
+    return { status, detail, vaultEnabled: verified, store, changes };
+  });
+
   app.get('/api/admin/ip', ownerRead, async request => ({
     store: storePrivate(await getStore(db)), clientIp: request.ip, probeConfigured: hasProbe, probeSource: connect ? 'connect' : 'checkout',
   }));
@@ -237,9 +262,22 @@ export function registerStore(app, db, config, { authRead, ownerRead, ownerWrite
       }
     } else add('IP público de saída', 'Não configurado', 'Defina o serviço de detecção de IP na instalação.');
     add('Ambientes maxiPago!', 'Não suportado', 'O provedor anunciou a desativação da plataforma.', null, 'PROVIDER_RETIRED');
-    add('Ambientes Itaú Checkout', 'Não configurado', 'Aguardando acesso ao contrato técnico e ao projeto Sandbox.', null, 'PROVIDER_ONBOARDING');
-    for (const name of ['Credenciais e autenticação', 'DNS e HTTPS do gateway', 'Autorização de IP', 'Tokenização e 3DS', 'Operações financeiras e webhooks']) {
-      add(name, 'Não verificado', 'A verificação depende da habilitação de um provedor homologado.');
+    add('Itaú Checkout', 'Não configurado', 'Aguardando contrato técnico do produto.', null, 'PROVIDER_ONBOARDING');
+    const started = performance.now();
+    try {
+      if (connect && (await connect.health()).redeConfigured && (await connect.rede('sandbox', '')).configured) {
+        await connect.rede('sandbox', '/test', { method: 'POST' });
+        add('Autenticação e.Rede Sandbox', 'Aprovado', 'A Rede emitiu um token OAuth para este ambiente.',
+          Math.round(performance.now() - started));
+      } else add('Autenticação e.Rede Sandbox', 'Não configurado', 'Ative o cofre e cadastre as credenciais do projeto.');
+    } catch (error) {
+      if (!(error instanceof RedeError || error instanceof NetworkError)) throw error;
+      add('Autenticação e.Rede Sandbox', 'Falhou', error.message +
+        (error.upstreamStatus ? ' HTTP ' + error.upstreamStatus + '.' : ''),
+      Math.round(performance.now() - started), error.upstreamCode ?? error.code);
+    }
+    for (const name of ['Autorização do IP perante a Rede', 'Tokenização e 3DS', 'Transações Pix Sandbox', 'Recebimento de webhooks e liquidação']) {
+      add(name, 'Não verificado', 'Consulte o resultado da operação oficial correspondente.');
     }
     return { checkedAt, tests };
   });

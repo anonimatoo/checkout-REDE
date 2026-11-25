@@ -30,16 +30,18 @@ docker compose version >/dev/null
 database_secret="$(openssl rand -hex 32)"
 link_secret="$(openssl rand -base64 32)"
 connect_secret="$(openssl rand -hex 32)"
+rede_secret="$(openssl rand -base64 32)"
 (
   umask 077
   set -o noclobber
   {
     printf 'APP_ORIGIN=%s\nPOSTGRES_PASSWORD=%s\nLINK_ENCRYPTION_KEY=%s\nCONNECT_TOKEN=%s\n' \
       "$origin" "$database_secret" "$link_secret" "$connect_secret"
+    printf 'CONNECT_REDE_KEY=%s\n' "$rede_secret"
     printf 'CONNECT_URL=http://connect:3400\nCONNECT_PRIVATE_HTTP=true\nCOMPOSE_PROFILES=connect\n'
     if [[ -n "$probe_url" ]]; then printf "EGRESS_PROBE_URL='%s'\n" "$probe_url"; fi
   } > .env
 )
-unset database_secret link_secret connect_secret
+unset database_secret link_secret connect_secret rede_secret
 docker compose up -d --build --wait
 docker compose exec -T app node backend/src/cli.js issue-setup

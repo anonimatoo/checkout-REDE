@@ -386,3 +386,5 @@ td small { display: block; color: var(--muted); margin-top: 3px; }
 .member-card summary { cursor: pointer; font-size: .9rem; }
 .member-card summary span { color: var(--muted); display: block; margin-top: 5px; }
 .member-card form { margin-top: 13px; }
+.sandbox-result { border-block: 1px solid var(--line); padding-block: 16px; }
+.sandbox-qr { width: min(100%, 220px); aspect-ratio: 1; object-fit: contain; background: white; }

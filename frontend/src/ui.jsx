@@ -19,6 +19,8 @@ export async function api(path, { method = 'GET', data, csrf, signal, headers } 
     const detail = await response.json().catch(() => ({}));
     const error = new Error(detail.message || 'Serviço indisponível. Tente novamente.');
     error.status = response.status;
+    error.upstreamCode = detail.upstreamCode;
+    error.upstreamStatus = detail.upstreamStatus;
     throw error;
   }
   return response.json();

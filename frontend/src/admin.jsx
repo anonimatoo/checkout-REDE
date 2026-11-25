@@ -4,6 +4,7 @@ import {
   Clipboard, CreditCard, FileText, Globe2, LayoutDashboard, Link2, LockKeyhole, LogOut, Menu, Plus,
   ReceiptText, Settings2, ShieldCheck, UserRound, UsersRound, X,
 } from 'lucide-react';
+import { ConnectStatus, Guide, RedeSettings, SandboxPix } from './rede.jsx';
 import { FirstAccess, Team } from './access.jsx';
 import { brl, maskCnpj, maskPhone, parseMoney } from '../../shared/format.js';
 import { api, Field, fmtDate, Header, Loading, Message, MoneyInput, moneyValue, SectionTitle, useRemote } from './ui.jsx';
@@ -11,12 +12,13 @@ import { api, Field, fmtDate, Header, Loading, Message, MoneyInput, moneyValue, 
 const pages = [
   ['painel', 'Dashboard', LayoutDashboard], ['nova', 'Nova venda', Plus], ['links', 'Links de pagamento', Link2],
   ['pedidos', 'Pedidos', ReceiptText], ['transacoes', 'Transações', CreditCard], ['clientes', 'Clientes', UserRound],
-  ['rede', 'Configurações Rede', Settings2], ['ip', 'Gerenciador de IP', Globe2], ['diagnostico', 'Diagnóstico', Activity],
+  ['rede', 'Configurações Rede', Settings2], ['ip', 'IP e Conectividade', Globe2],
+  ['connect', 'CS REDE CONNECT', Activity], ['configurar', 'Configuração inicial', Settings2], ['diagnostico', 'Diagnóstico', Activity],
   ['sandbox', 'Simulador Sandbox', ShieldCheck], ['relatorios', 'Relatórios', ArrowDownToLine],
   ['loja', 'Personalização', Building2], ['seguranca', 'Segurança', LockKeyhole],
   ['equipe', 'Equipe e permissões', UsersRound], ['auditoria', 'Auditoria', FileText],
 ];
-const ownerPages = new Set(['rede', 'ip', 'diagnostico', 'sandbox', 'loja', 'auditoria', 'equipe']);
+const ownerPages = new Set(['rede', 'ip', 'diagnostico', 'sandbox', 'loja', 'auditoria', 'equipe', 'connect', 'configurar']);
 const orderStatuses = { open: 'Aberto', canceled: 'Cancelado', expired: 'Expirado' };
 
 function AdminLogin({ onLogin, recovery }) {
@@ -141,12 +143,14 @@ function Orders({ user, pageType }) {
   const [page, setPage] = useState(1);
   const [min, setMin] = useState('');
   const [max, setMax] = useState('');
+  const [orderId, setOrderId] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const period = usePeriod();
   const filters = new URLSearchParams(period.query);
   if (status) filters.set('status', status);
+  if (orderId.trim()) filters.set('id', orderId.trim());
   const minCents = parseMoney(min);
   const maxCents = parseMoney(max);
   const validValue = (!min || minCents !== null) && (!max || maxCents !== null) &&
@@ -192,6 +196,9 @@ function Orders({ user, pageType }) {
       }}>
         <option value="">Todas</option>{Object.entries(orderStatuses).map(([state, label]) => <option key={state} value={state}>{label}</option>)}
       </select></Field>
+      <Field label="Código ou referência do pedido"><input value={orderId} maxLength={50} onChange={event => {
+        setOrderId(event.target.value); setPage(1); select(null);
+      }} /></Field>
       <div className="field"><label htmlFor="filter-min">Valor mínimo</label>
         <MoneyInput id="filter-min" className="filter-money" value={min} onChange={value => {
           setMin(value); setPage(1); select(null);
@@ -486,26 +493,14 @@ function Audit() {
 }
 
 function GatewayState({ page }) {
-  const remote = useRemote('/admin/provedor');
   const sections = {
     transacoes: ['Nenhuma transação processada', 'A criação e a gestão de transações dependem de um gateway homologado.'],
     clientes: ['Nenhum cadastro de comprador', 'O checkout atual mantém os campos de comprador apenas no navegador.'],
-    rede: ['Itaú Checkout', 'A Rede indicou o Itaú Checkout para a migração do maxiPago!. A conexão depende da habilitação do produto para o estabelecimento.'],
-    sandbox: ['Sandbox do Itaú Checkout', 'A execução de testes depende de um projeto Sandbox habilitado para o Itaú Checkout.'],
   };
   const [title, detail] = sections[page];
-  return <Data remote={remote}>{data => <section className="surface admin-panel unavailable">
+  return <section className="surface admin-panel unavailable">
     <SectionTitle icon={CreditCard}>{title}</SectionTitle><p>{detail}</p>
-    {page === 'rede' && <dl className="summary-list"><div><dt>CS REDE CONNECT</dt><dd>{data.connectConfigured ? 'Endereço configurado' : 'A configurar'}</dd></div>
-      <div><dt>Autenticação Sandbox</dt><dd>Aguardando habilitação</dd></div>
-      <div><dt>Autenticação Produção</dt><dd>Aguardando homologação</dd></div></dl>}
-    {['rede', 'sandbox'].includes(page) && <a className="button secondary fit" href={data.payment.portal} target="_blank" rel="noreferrer">
-      Portal do Desenvolvedor Rede <ArrowUpRight size={15} />
-    </a>}
-    {['rede', 'sandbox'].includes(page) && <a className="button secondary fit" href={data.payment.announcement} target="_blank" rel="noreferrer">
-      Comunicado oficial <ArrowUpRight size={15} />
-    </a>}
-  </section>}</Data>;
+  </section>;
 }
 
 function SettingsPage({ user, type }) {
@@ -530,10 +525,12 @@ function AdminPanel({ user, page, onLogout }) {
   let content;
   if (!canAccess) content = <Message tone="error">Seu perfil não tem permissão para acessar esta seção.</Message>;
   else if (['pedidos', 'links', 'relatorios'].includes(page)) content = <Orders user={user} pageType={page} />;
-  else if (['transacoes', 'clientes', 'rede', 'sandbox'].includes(page)) content = <>
-    <GatewayState page={page} />{page === 'rede' && <SettingsPage user={user} type={page} />}
-  </>;
-  else if (page === 'ip') content = <IpManager user={user} />;
+  else if (page === 'rede') content = <><RedeSettings user={user} /><SettingsPage user={user} type={page} /></>;
+  else if (page === 'sandbox') content = <SandboxPix user={user} />;
+  else if (['transacoes', 'clientes'].includes(page)) content = <GatewayState page={page} />;
+  else if (page === 'ip') content = <><IpManager user={user} /><ConnectStatus /></>;
+  else if (page === 'connect') content = <ConnectStatus />;
+  else if (page === 'configurar') content = <Guide />;
   else if (page === 'diagnostico') content = <Diagnosis user={user} />;
   else if (page === 'loja') content = <SettingsPage user={user} type={page} />;
   else if (page === 'seguranca') content = <Security user={user} onLogout={onLogout} />;

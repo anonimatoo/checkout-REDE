@@ -47,7 +47,12 @@ function orderFilter(query) {
     args.push(value);
     conditions.push(`${column} ${operator} $${args.length}`);
   };
-  const { status, min, max } = query;
+  const { status, min, max, id } = query;
+  if (id !== undefined) {
+    if (typeof id !== 'string' || !id.trim() || id.length > 50) return null;
+    if (uuid.test(id)) add('id', '=', id);
+    else add('reference', '=', id.trim());
+  }
   if (status) {
     if (!Object.hasOwn(labels, status)) return null;
     add('(' + state + ')', '=', status);
