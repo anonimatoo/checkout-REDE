@@ -2,8 +2,9 @@ import React, { useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, ArrowUpRight, Building2, ChevronLeft, ChevronRight,
   Clipboard, CreditCard, FileText, Globe2, LayoutDashboard, Link2, LockKeyhole, LogOut, Menu, Plus,
-  ReceiptText, Settings2, ShieldCheck, UserRound, X,
+  ReceiptText, Settings2, ShieldCheck, UserRound, UsersRound, X,
 } from 'lucide-react';
+import { FirstAccess, Team } from './access.jsx';
 import { brl, maskCnpj, maskPhone, parseMoney } from '../../shared/format.js';
 import { api, Field, fmtDate, Header, Loading, Message, MoneyInput, moneyValue, SectionTitle, useRemote } from './ui.jsx';
 
@@ -12,8 +13,10 @@ const pages = [
   ['pedidos', 'Pedidos', ReceiptText], ['transacoes', 'Transações', CreditCard], ['clientes', 'Clientes', UserRound],
   ['rede', 'Configurações Rede', Settings2], ['ip', 'Gerenciador de IP', Globe2], ['diagnostico', 'Diagnóstico', Activity],
   ['sandbox', 'Simulador Sandbox', ShieldCheck], ['relatorios', 'Relatórios', ArrowDownToLine],
-  ['loja', 'Personalização', Building2], ['seguranca', 'Segurança', LockKeyhole], ['auditoria', 'Auditoria', FileText],
+  ['loja', 'Personalização', Building2], ['seguranca', 'Segurança', LockKeyhole],
+  ['equipe', 'Equipe e permissões', UsersRound], ['auditoria', 'Auditoria', FileText],
 ];
+const ownerPages = new Set(['rede', 'ip', 'diagnostico', 'sandbox', 'loja', 'auditoria', 'equipe']);
 const orderStatuses = { open: 'Aberto', canceled: 'Cancelado', expired: 'Expirado' };
 
 function AdminLogin({ onLogin, recovery }) {
@@ -23,6 +26,7 @@ function AdminLogin({ onLogin, recovery }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
   const [secret] = useState(() => location.hash.slice(1));
+  const setup = useRemote('/auth/setup');
 
   async function submit(event) {
     event.preventDefault();
@@ -47,8 +51,8 @@ function AdminLogin({ onLogin, recovery }) {
   return <div className="checkout-page login-page">
     <Header admin />
     <main className="wrap"><section className="surface login-card">
-      <SectionTitle icon={LockKeyhole}>{recovery ? 'Recuperar acesso' : 'Painel Administrativo'}</SectionTitle>
-      <p>{recovery ? 'Defina uma nova senha para sua conta.' : 'Entre para gerenciar seu estabelecimento.'}</p>
+      <SectionTitle icon={LockKeyhole}>{recovery ? 'Definir senha' : 'Painel Administrativo'}</SectionTitle>
+      <p>{recovery ? 'Use seu link de convite ou recuperação para definir a senha da conta.' : 'Entre para gerenciar seu estabelecimento.'}</p>
       {done ? <><Message tone="ok">Senha atualizada. Entre novamente para continuar.</Message>
         <a className="button primary" href="/admin">Voltar ao login</a></>
         : <form onSubmit={submit} className="form-stack">
@@ -62,6 +66,7 @@ function AdminLogin({ onLogin, recovery }) {
             {busy ? 'Aguarde…' : recovery ? 'Atualizar senha' : 'Entrar'}
           </button>
         </form>}
+      {!recovery && setup.data?.initialized === false && <a className="button secondary" href="/admin/primeiro-acesso">Primeiro acesso</a>}
       {!recovery && <details className="recovery-help">
         <summary>Esqueci minha senha</summary>
         <p>Solicite ao responsável pela instalação um link de recuperação de uso único.</p>
@@ -105,12 +110,12 @@ function PeriodFilter({ value, onChange }) {
   </>;
 }
 
-function Dashboard() {
+function Dashboard({ user }) {
   const period = usePeriod();
   const remote = useRemote('/admin/resumo?' + period.query);
   return <>
     <div className="admin-toolbar"><PeriodFilter value={period} />
-      <a className="button primary" href="/?nova=1"><Plus size={17} /> Nova venda</a></div>
+      {user.role !== 'viewer' && <a className="button primary" href="/?nova=1"><Plus size={17} /> Nova venda</a>}</div>
     {!period.ready ? <Message>Informe as datas inicial e final.</Message> : <Data remote={remote}>{data => <>
       <div className="metrics">
         {[['Pedidos criados', data.total], ['Pedidos abertos', data.open], ['Pedidos encerrados', data.canceled + data.expired],
@@ -134,14 +139,26 @@ function Orders({ user, pageType }) {
   const [confirm, setConfirm] = useState(false);
   const [status, setStatus] = useState('');
   const [page, setPage] = useState(1);
+  const [min, setMin] = useState('');
+  const [max, setMax] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const period = usePeriod();
   const filters = new URLSearchParams(period.query);
   if (status) filters.set('status', status);
-  const exportQuery = new URLSearchParams(filters);
-  exportQuery.set('format', 'csv');
+  const minCents = parseMoney(min);
+  const maxCents = parseMoney(max);
+  const validValue = (!min || minCents !== null) && (!max || maxCents !== null) &&
+    (minCents === null || maxCents === null || minCents <= maxCents);
+  if (minCents !== null) filters.set('min', minCents);
+  if (maxCents !== null) filters.set('max', maxCents);
+  function exportQuery(format) {
+    const query = new URLSearchParams(filters);
+    query.delete('page');
+    query.set('format', format);
+    return '/api/admin/pedidos?' + query;
+  }
   filters.set('page', page);
   const remote = useRemote('/admin/pedidos?' + filters);
 
@@ -175,10 +192,20 @@ function Orders({ user, pageType }) {
       }}>
         <option value="">Todas</option>{Object.entries(orderStatuses).map(([state, label]) => <option key={state} value={state}>{label}</option>)}
       </select></Field>
-      {period.ready && <a className="button secondary" href={'/api/admin/pedidos?' + exportQuery}><ArrowDownToLine size={16} /> Exportar CSV</a>}
-      {pageType !== 'relatorios' && <a className="button primary" href="/?nova=1"><Plus size={17} /> Nova venda</a>}
+      <div className="field"><label htmlFor="filter-min">Valor mínimo</label>
+        <MoneyInput id="filter-min" className="filter-money" value={min} onChange={value => {
+          setMin(value); setPage(1); select(null);
+        }} /></div>
+      <div className="field"><label htmlFor="filter-max">Valor máximo</label>
+        <MoneyInput id="filter-max" className="filter-money" value={max} onChange={value => {
+          setMax(value); setPage(1); select(null);
+        }} /></div>
+      {period.ready && validValue && <>{[['csv', 'CSV'], ['xlsx', 'Excel']].map(([format, label]) =>
+        <a key={format} className="button secondary" href={exportQuery(format)}><ArrowDownToLine size={16} /> Exportar {label}</a>
+      )}</>}
+      {pageType !== 'relatorios' && user.role !== 'viewer' && <a className="button primary" href="/?nova=1"><Plus size={17} /> Nova venda</a>}
     </div>
-    {!period.ready ? <Message>Informe as datas inicial e final.</Message> : <Data remote={remote}>{data => <div className="surface admin-panel">
+    {!period.ready ? <Message>Informe as datas inicial e final.</Message> : !validValue ? <Message>Confira a faixa de valores.</Message> : <Data remote={remote}>{data => <div className="surface admin-panel">
       {data.orders.length ? <>
         <div className="table-scroll"><table><thead><tr>
           <th scope="col">Referência</th><th scope="col">Valor</th><th scope="col">Criado em</th><th scope="col">Situação</th><th scope="col">Ações</th>
@@ -345,12 +372,13 @@ function IpManager({ user }) {
     <SectionTitle icon={Globe2}>Rede e saída do backend</SectionTitle>
     <dl className="summary-list">
       <div><dt>IP da conexão com o painel</dt><dd>{data.clientIp}</dd></div>
-      <div><dt>IP público de saída</dt><dd>{data.store.observedEgress || 'Não verificado'}</dd></div>
+      <div><dt>IP público de saída {data.probeSource === 'connect' ? 'do CS REDE CONNECT' : 'do checkout'}</dt><dd>{data.store.observedEgress || 'Não verificado'}</dd></div>
       <div><dt>Bloco cadastrado internamente</dt><dd>{data.store.authorizedCidr || 'Não configurado'}</dd></div>
       <div><dt>Última verificação</dt><dd>{fmtDate(data.store.egressCheckedAt)}</dd></div>
       <div><dt>Comparação com o bloco cadastrado</dt><dd>{data.store.egressMatch === null ? 'Não verificado' : data.store.egressMatch ? 'Dentro do bloco' : 'Fora do bloco'}</dd></div>
       <div><dt>Autorização do gateway</dt><dd>Não verificada</dd></div>
     </dl>
+    <p className="muted">Use o portal oficial para solicitar a autorização do IP exigido para seu contrato.</p>
     {data.store.egressMatch === false && <Message tone="error">O IP público de saída está fora do bloco cadastrado.</Message>}
     <div className="share-actions">
       <button className="button secondary" disabled={busy} onClick={remote.retry}>Atualizar conexões</button>
@@ -458,16 +486,22 @@ function Audit() {
 }
 
 function GatewayState({ page }) {
-  const remote = useRemote('/admin/configuracao');
+  const remote = useRemote('/admin/provedor');
   const sections = {
     transacoes: ['Nenhuma transação processada', 'A criação e a gestão de transações dependem de um gateway homologado.'],
     clientes: ['Nenhum cadastro de comprador', 'O checkout atual mantém os campos de comprador apenas no navegador.'],
-    rede: ['maxiPago! descontinuado', 'A Rede anunciou o encerramento da plataforma em 15 de outubro de 2026.'],
-    sandbox: ['Sandbox indisponível', 'A execução de cenários de teste depende de um ambiente homologado.'],
+    rede: ['Itaú Checkout', 'A Rede indicou o Itaú Checkout para a migração do maxiPago!. A conexão depende da habilitação do produto para o estabelecimento.'],
+    sandbox: ['Sandbox do Itaú Checkout', 'A execução de testes depende de um projeto Sandbox habilitado para o Itaú Checkout.'],
   };
   const [title, detail] = sections[page];
   return <Data remote={remote}>{data => <section className="surface admin-panel unavailable">
     <SectionTitle icon={CreditCard}>{title}</SectionTitle><p>{detail}</p>
+    {page === 'rede' && <dl className="summary-list"><div><dt>CS REDE CONNECT</dt><dd>{data.connectConfigured ? 'Endereço configurado' : 'A configurar'}</dd></div>
+      <div><dt>Autenticação Sandbox</dt><dd>Aguardando habilitação</dd></div>
+      <div><dt>Autenticação Produção</dt><dd>Aguardando homologação</dd></div></dl>}
+    {['rede', 'sandbox'].includes(page) && <a className="button secondary fit" href={data.payment.portal} target="_blank" rel="noreferrer">
+      Portal do Desenvolvedor Rede <ArrowUpRight size={15} />
+    </a>}
     {['rede', 'sandbox'].includes(page) && <a className="button secondary fit" href={data.payment.announcement} target="_blank" rel="noreferrer">
       Comunicado oficial <ArrowUpRight size={15} />
     </a>}
@@ -484,6 +518,7 @@ function AdminPanel({ user, page, onLogout }) {
   const [nav, setNav] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const canAccess = !ownerPages.has(page) || user.role === 'owner';
   const title = pages.find(([key]) => key === page)?.[1] ?? 'Dashboard';
   async function logout() {
     setBusy(true);
@@ -493,7 +528,8 @@ function AdminPanel({ user, page, onLogout }) {
   }
 
   let content;
-  if (['pedidos', 'links', 'relatorios'].includes(page)) content = <Orders user={user} pageType={page} />;
+  if (!canAccess) content = <Message tone="error">Seu perfil não tem permissão para acessar esta seção.</Message>;
+  else if (['pedidos', 'links', 'relatorios'].includes(page)) content = <Orders user={user} pageType={page} />;
   else if (['transacoes', 'clientes', 'rede', 'sandbox'].includes(page)) content = <>
     <GatewayState page={page} />{page === 'rede' && <SettingsPage user={user} type={page} />}
   </>;
@@ -501,8 +537,9 @@ function AdminPanel({ user, page, onLogout }) {
   else if (page === 'diagnostico') content = <Diagnosis user={user} />;
   else if (page === 'loja') content = <SettingsPage user={user} type={page} />;
   else if (page === 'seguranca') content = <Security user={user} onLogout={onLogout} />;
+  else if (page === 'equipe') content = <Team user={user} />;
   else if (page === 'auditoria') content = <Audit />;
-  else content = <Dashboard />;
+  else content = <Dashboard user={user} />;
 
   return <div className="admin-page">
     <Header admin />
@@ -511,7 +548,7 @@ function AdminPanel({ user, page, onLogout }) {
         {nav ? <X size={17} /> : <Menu size={17} />} Menu
       </button>
       <nav className={'admin-nav surface ' + (nav ? 'is-open' : '')} id="admin-nav" aria-label="Painel Administrativo">
-        {pages.map(([key, label, Icon]) => <a key={key} href={key === 'nova' ? '/?nova=1' : key === 'painel' ? '/admin' : '/admin/' + key}
+        {pages.filter(([key]) => (!ownerPages.has(key) || user.role === 'owner') && (key !== 'nova' || user.role !== 'viewer')).map(([key, label, Icon]) => <a key={key} href={key === 'nova' ? '/?nova=1' : key === 'painel' ? '/admin' : '/admin/' + key}
           aria-current={key === page ? 'page' : undefined}><Icon size={17} aria-hidden="true" /> {label}</a>)}
         <button onClick={logout} disabled={busy}><LogOut size={17} /> {busy ? 'Saindo…' : 'Sair'}</button>
       </nav>
@@ -530,6 +567,7 @@ export function Admin({ page = 'painel' }) {
   const [notice, setNotice] = useState('');
   const [pageAfterLogout, setPageAfterLogout] = useState(null);
   if (page === 'recuperar') return <AdminLogin recovery />;
+  if (page === 'primeiro-acesso') return <FirstAccess />;
   const current = user === undefined ? session.data?.user : user;
   if (user === undefined && (session.loading || session.error)) {
     return <div className="checkout-page"><Header admin /><main className="wrap"><div className="surface status-page">

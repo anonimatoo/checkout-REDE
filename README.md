@@ -4,11 +4,11 @@ Checkout web em português para uma instalação por estabelecimento. O aplicati
 
 ## Situação dos pagamentos
 
-A Rede anunciou a desativação do maxiPago! em **15 de outubro de 2026**. Este repositório implementa a criação e a gestão de pedidos, com a cobrança bloqueada. A tela de cartão exibe a indisponibilidade do provedor. Os campos do comprador ficam no navegador e o ViaCEP recebe apenas o CEP informado.
+A Rede confirmou o encerramento do **maxiPago! em 15 de outubro de 2026** e indicou o **Itaú Checkout** como sucessor. O projeto identifica o novo provedor no painel. O contrato técnico específico da API e o acesso a um projeto Sandbox são necessários para implementar e homologar a autenticação e as operações financeiras. O endereço técnico indicado no anúncio redirecionou para o Itaú Brand Portal durante a verificação.
 
-O estágio atual permite conferir pedidos e valores por links com validade. Cobrança, credenciais, autorização, captura, cancelamento financeiro, estorno, consulta de transações, tokenização, 3DS, webhooks e Sandbox dependem de um gateway ativo e homologado. O encerramento de um link afeta somente o pedido local. O painel apresenta valores de pedidos separadamente de valores financeiros processados.
+O checkout mantém a cobrança bloqueada e aceita criar pedidos com valor protegido e validade. Os campos do comprador ficam no navegador e o ViaCEP consulta somente o CEP. O dashboard e as exportações apresentam pedidos. O cancelamento de link encerra o pedido local.
 
-[Comunicado oficial da Rede](https://www.maxipago.com/developers/) · [ViaCEP](https://viacep.com.br/) · [Cálculo do CNPJ pela Receita Federal](https://www.gov.br/receitafederal/pt-br/centrais-de-conteudo/publicacoes/documentos-tecnicos/cnpj)
+[Comunicado oficial](https://www.maxipago.com/developers/) · [FAQ de encerramento](https://www.maxipago.com/developers/encerramento/) · [Portal do Desenvolvedor Rede](https://developer.userede.com.br/ponto-partida) · [ViaCEP](https://viacep.com.br/) · [Cálculo do CNPJ](https://www.gov.br/receitafederal/pt-br/centrais-de-conteudo/publicacoes/documentos-tecnicos/cnpj)
 
 ## Executar localmente
 
@@ -23,42 +23,52 @@ Requer Node.js 24, npm e PostgreSQL 17. Crie um banco dedicado e um usuário com
    npm run migrate
    ```
 
-3. Crie a primeira conta pelo terminal da instalação. O comando a seguir usa Bash e lê a senha sem mostrá-la. Substitua o endereço pelo e-mail administrativo.
-
-   ```bash
-   read -r -s -p 'Senha administrativa com 12 a 128 caracteres: ' CHECKOUT_ADMIN_PASSWORD
-   printf '\n'
-   printf '%s' "$CHECKOUT_ADMIN_PASSWORD" | npm run admin:create -- admin@exemplo.com
-   unset CHECKOUT_ADMIN_PASSWORD
-   ```
-
-4. Execute `npm start` e abra `http://localhost:3000`. Entre em `/admin`. Em **Nova venda**, digite o valor, confira o resumo, confirme o valor e gere o link. Use **Detalhes da venda** para informar a descrição, a referência, a validade e o máximo de parcelas.
-5. Exemplo de digitação. Insira `2599` para ver `2.599` no campo. Ao sair do campo, o valor aparece com os centavos e o resumo mostra `R$ 2.599,00`. Use vírgula para informar centavos.
+3. Gere o link de primeiro acesso com `npm run admin:setup`. Rode `npm start`, abra o link emitido e crie a conta proprietária no navegador. O link expira em 30 minutos e a emissão de um novo invalida o anterior.
+4. Entre em `/admin`. Em **Nova venda**, digite o valor, confira o resumo, confirme o valor e gere o link. Use **Detalhes da venda** para informar a descrição, a referência, a validade e o máximo de parcelas.
+5. Digite `2599` para ver `2.599` no campo. Ao sair, o resumo exibe `R$ 2.599,00`. Use vírgula para informar centavos.
 
 O servidor também aplica migrações na inicialização. As saídas de build moram em `frontend/dist`. Depois de alterar a interface, rode `npm run build` e reinicie a aplicação para servi-la.
 
-### Recuperação de acesso
+### Equipe e recuperação de acesso
 
-Rode `npm run admin:recover -- admin@exemplo.com` no terminal da instalação. Abra o link de uso único, que expira em 20 minutos. A alteração ou recuperação de senha encerra as sessões existentes. A conta inicial é criada somente pelo terminal. O painel não possui cadastro público.
+O proprietário pode gerar links de convite individuais em **Equipe e permissões**. O perfil **Operador** cria e cancela links de pedidos. O perfil **Consulta** visualiza pedidos e exporta relatórios. O proprietário gerencia a equipe, personalização, limites, diagnóstico e IP. Bloquear um membro ou alterar seu perfil encerra as sessões dele. Convites têm validade de 24 horas e uso único.
 
-## Instância com Docker Compose e HTTPS
+Para recuperar uma conta, rode `npm run admin:recover -- admin@exemplo.com` no terminal da instalação e abra o link. A alteração ou recuperação de senha encerra as sessões existentes. Em Docker, use `docker compose exec -T app node backend/src/cli.js recover-admin admin@exemplo.com`.
 
-1. Configure DNS para o servidor. Coloque o certificado e a chave TLS em `infra/tls/fullchain.pem` e `infra/tls/privkey.pem`. A renovação da TLS pertence à infraestrutura. Recarregue o Nginx após a renovação.
-2. No arquivo `.env`, configure `APP_ORIGIN` com a origem HTTPS sem caminho, `POSTGRES_PASSWORD` com uma senha hexadecimal gerada com `openssl rand -hex 32` e `LINK_ENCRYPTION_KEY` com uma chave de 32 bytes em Base64. Restrinja o acesso a esse arquivo.
-3. Execute `docker compose up -d --build`. A porta pública é 443 e o banco fica na rede privada do Compose. Se a faixa `172.28.44.0/24` já estiver em uso, ajuste a sub-rede, o endereço do Nginx e `TRUST_PROXY_IP` juntos em `compose.yaml`.
-4. Crie a conta pelo container, usando a mesma leitura oculta do exemplo local e passando a senha para `docker compose exec -T app node backend/src/cli.js create-admin admin@exemplo.com` pela entrada padrão. Para recuperação em Docker, use `docker compose exec -T app node backend/src/cli.js recover-admin admin@exemplo.com`.
+## Instalação com Docker Compose e HTTPS
 
-A origem é usada na verificação de CSRF e na geração de links. Em produção, o aplicativo exige HTTPS e usa cookies `Secure`, `HttpOnly` e `SameSite=Strict`. O Nginx substitui cabeçalhos encaminhados pelo cliente. Em infraestrutura própria, configure `TRUST_PROXY_IP` somente para o proxy confiável. Na porta web, os compradores usam a origem pública e o backend usa a rota de saída da infraestrutura.
+Requer Bash, OpenSSL, Docker Compose, DNS e um certificado TLS para a origem do checkout. Use uma instalação e um banco separados por estabelecimento.
 
-### Gerenciador de IP
+1. Configure o DNS e coloque o certificado e a chave em `infra/tls/fullchain.pem` e `infra/tls/privkey.pem`.
+2. Execute `bash scripts/install.sh https://checkout.exemplo.com`. O script cria o arquivo `.env` com segredos aleatórios, inicia a instalação com o Connect na rede privada e emite o link de primeiro acesso. Para habilitar a detecção de saída na instalação, passe como segundo argumento a URL HTTPS do serviço que retorna o IP em texto.
+3. Abra o link emitido para cadastrar a conta proprietária. Se expirar, gere outro com `docker compose exec -T app node backend/src/cli.js issue-setup`.
 
-O painel exibe o endereço da conexão recebida pelo backend. Para medir o IP público de saída, configure `EGRESS_PROBE_URL` com um serviço HTTPS de sua confiança que retorne somente um IPv4 ou IPv6 em texto. A verificação roda sob demanda e a cada hora, registra mudanças na auditoria e compara o endereço medido com o bloco interno informado. A configuração do endereço de saída e o cadastro de IP em um portal do provedor são operações da infraestrutura e do lojista, respectivamente.
+A porta pública é 443. O banco e o Connect ficam em redes Docker sem portas publicadas no host. Se a faixa `172.28.44.0/24` já estiver em uso, ajuste a sub-rede, o endereço do Nginx e `TRUST_PROXY_IP` em `compose.yaml`. Recarregue o Nginx após renovar o certificado.
 
-### Verificações
+### Atualização de uma instalação existente
+
+Mantenha o `POSTGRES_PASSWORD`, o volume e o `LINK_ENCRYPTION_KEY` existentes. A inicialização aplica a migração de perfis e mantém o administrador atual como proprietário. Para habilitar o Connect na mesma máquina, acrescente estas variáveis ao `.env` e rode `docker compose up -d --build --wait`. Gere o token com `openssl rand -hex 32`.
+
+```dotenv
+COMPOSE_PROFILES=connect
+CONNECT_URL=http://connect:3400
+CONNECT_PRIVATE_HTTP=true
+CONNECT_TOKEN=SUBSTITUA_POR_TOKEN_ALEATORIO
+```
+
+### CS REDE CONNECT em host separado
+
+A imagem do Connect pode ser construída de forma independente com `docker build --target connect -t cs-rede-connect .`. Execute-a em um host com saída pública estática e use o mesmo `CONNECT_TOKEN` aleatório configurado no checkout. Configure `CONNECT_HOST=0.0.0.0`, `CONNECT_PORT=3400`, `CONNECT_TLS_CERT` e `CONNECT_TLS_KEY` para apontar para os arquivos montados de um certificado válido e sua chave. Limite o acesso de entrada à infraestrutura do checkout. No checkout, defina `CONNECT_URL` como a origem HTTPS do Connect, sem caminho. `CONNECT_PRIVATE_HTTP=true` é para o Compose local.
+
+O Connect responde às verificações autenticadas de saúde e IP. Configure `EGRESS_PROBE_URL` no Connect com um serviço HTTPS confiável que devolva somente um endereço em texto. A verificação roda ao iniciar, a cada hora e sob demanda. O painel compara o IP medido ao bloco cadastrado e registra mudanças na auditoria. Para aprovar o IP no contrato, consulte o portal da Rede e use a rota estática de saída do host ou NAT da instalação. O resultado da medição descreve a rota até o serviço de IP.
+
+A conexão de um navegador com o checkout permanece independente da saída de rede do Connect. Em produção, o checkout exige HTTPS e usa cookies `Secure`, `HttpOnly` e `SameSite=Strict`. O Nginx substitui os cabeçalhos encaminhados pelo cliente. Preserve backups separados do PostgreSQL e da chave de links.
+
+### Validação
 
 ```bash
 npm run build
 npm test
 ```
 
-Para executar também os testes de integração, defina `TEST_DATABASE_URL` apontando para um banco de teste em que o usuário possa criar schemas. O teste cria e remove um schema isolado. Ele verifica sessões, origem e CSRF, idempotência concorrente, proteção de valor, exportação CSV, diagnóstico, cancelamento e recuperação de senha. Em produção, mantenha backups separados para o PostgreSQL e para a chave de links.
+Para incluir os testes com PostgreSQL, configure `TEST_DATABASE_URL` para um banco de teste em que o usuário possa criar schemas. Os testes criam e removem schemas isolados. [Relatório de validação](docs/validacao.md)

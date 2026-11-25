@@ -4,7 +4,9 @@ import helmet from '@fastify/helmet';
 import { createReadStream } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { extname } from 'node:path';
+import { connectClient } from './connect.js';
 import { registerAuth } from './auth.js';
+import { registerTeam } from './team.js';
 import { registerOrders } from './orders.js';
 import { egressMonitor, registerStore } from './store.js';
 
@@ -48,14 +50,18 @@ export async function buildApp(config, pool, { logger = false, frontend = true }
   });
 
   const authorization = await registerAuth(app, pool, config);
-  const verifyEgress = egressMonitor(pool, config);
-  registerStore(app, pool, config, authorization, verifyEgress);
+  const connect = connectClient(config);
+  const verifyEgress = egressMonitor(pool, config, connect);
+  registerStore(app, pool, config, authorization, verifyEgress, connect);
   registerOrders(app, pool, config, authorization);
-  if (config.egressUrl) {
+  registerTeam(app, pool, config, authorization);
+  if (connect || config.egressUrl) {
     const check = () => verifyEgress().catch(() => app.log.warn('Não foi possível verificar o IP de saída.'));
     const interval = setInterval(check, 60 * 60 * 1000);
     interval.unref();
-    app.addHook('onClose', async () => clearInterval(interval));
+    const initial = setTimeout(check, 1000);
+    initial.unref();
+    app.addHook('onClose', async () => { clearInterval(interval); clearTimeout(initial); });
   }
 
   if (frontend) {

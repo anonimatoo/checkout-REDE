@@ -1,3 +1,4 @@
+import writeExcelFile from 'write-excel-file/node';
 import { randomUUID } from 'node:crypto';
 import { MAX_CENTS } from '../../shared/format.js';
 import { audit, inTransaction } from './db.js';
@@ -7,7 +8,6 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const labels = { open: 'Aberto', expired: 'Expirado', canceled: 'Cancelado' };
 const state = "CASE WHEN canceled_at IS NOT NULL THEN 'canceled' WHEN expires_at <= now() THEN 'expired' ELSE 'open' END";
 
-const status = query => Object.hasOwn(labels, query?.status) ? query.status : '';
 const periods = {
   hoje: [0, 1], ontem: [-1, 0], '7dias': [-6, 1], '30dias': [-29, 1],
 };
@@ -40,6 +40,29 @@ function dateFilter(query, offset) {
   return { sql: '', args: [] };
 }
 
+function orderFilter(query) {
+  const conditions = [];
+  const args = [];
+  const add = (column, operator, value) => {
+    args.push(value);
+    conditions.push(`${column} ${operator} $${args.length}`);
+  };
+  const { status, min, max } = query;
+  if (status) {
+    if (!Object.hasOwn(labels, status)) return null;
+    add('(' + state + ')', '=', status);
+  }
+  const valid = value => typeof value === 'string' && /^\d{1,9}$/.test(value) && Number(value) <= MAX_CENTS;
+  if ((min !== undefined && !valid(min)) || (max !== undefined && !valid(max)) ||
+    (min !== undefined && max !== undefined && Number(min) > Number(max))) return null;
+  if (min !== undefined) add('amount_cents', '>=', Number(min));
+  if (max !== undefined) add('amount_cents', '<=', Number(max));
+  const range = dateFilter(query, args.length + 1);
+  if (!range) return null;
+  return { sql: 'WHERE true' + conditions.map(condition => ' AND ' + condition).join('') + range.sql,
+    args: [...args, ...range.args] };
+}
+
 function asOrder(row) {
   return {
     id: row.id, reference: row.reference, description: row.description, cents: row.amount_cents,
@@ -48,8 +71,8 @@ function asOrder(row) {
   };
 }
 
-function serialized(row, config) {
-  const url = row.status === 'open' ? config.origin + '/pedido/' + unseal(row.token_sealed, config.key, row.id) : null;
+function serialized(row, config, showLink = true) {
+  const url = showLink && row.status === 'open' ? config.origin + '/pedido/' + unseal(row.token_sealed, config.key, row.id) : null;
   return { ...asOrder(row), url };
 }
 
@@ -67,7 +90,7 @@ function badInput(reply, message) {
   return reply.code(400).send({ code: 'ORDER_INPUT', message });
 }
 
-export function registerOrders(app, db, config, { authRead, authWrite }) {
+export function registerOrders(app, db, config, { authRead, orderWrite }) {
   app.get('/api/pedidos/:token', async (request, reply) => {
     const raw = request.params.token;
     const notFound = () => reply.code(404).send({ code: 'ORDER_UNKNOWN', message: 'Link de pedido inválido ou indisponível.' });
@@ -78,7 +101,7 @@ export function registerOrders(app, db, config, { authRead, authWrite }) {
     return order;
   });
 
-  app.post('/api/admin/pedidos', authWrite, async (request, reply) => {
+  app.post('/api/admin/pedidos', orderWrite, async (request, reply) => {
     const idempotency = request.headers['idempotency-key'];
     if (typeof idempotency !== 'string' || !uuid.test(idempotency)) {
       return badInput(reply, 'Crie uma chave de idempotência válida.');
@@ -125,44 +148,46 @@ export function registerOrders(app, db, config, { authRead, authWrite }) {
   });
 
   app.get('/api/admin/pedidos', authRead, async (request, reply) => {
-    const args = [request.session.id];
-    let where = 'WHERE admin_id = $1';
-    const chosen = status(request.query);
-    if (chosen) {
-      args.push(chosen);
-      where += ` AND (${state}) = $${args.length}`;
-    }
-    const range = dateFilter(request.query, args.length + 1);
-    if (!range) return badInput(reply, 'Informe um período válido.');
-    where += range.sql;
-    args.push(...range.args);
-    if (request.query.format === 'csv') {
-      const { rows } = await db.query(`SELECT *, ${state} AS status FROM orders ${where}
+    const filter = orderFilter(request.query);
+    if (!filter) return badInput(reply, 'Informe um período, faixa de valor e situação válidos.');
+    const { sql: where, args } = filter;
+    const { format } = request.query;
+    if (format === 'csv' || format === 'xlsx') {
+      const { rows } = await db.query(`SELECT reference, description, amount_cents, max_installments,
+          created_at, expires_at, ${state} AS status FROM orders ${where}
         ORDER BY created_at DESC, id DESC LIMIT 10001`, args);
       if (rows.length > 10000) return badInput(reply, 'Selecione um período com até 10.000 pedidos para exportar.');
-      reply.type('text/csv; charset=utf-8').header('Content-Disposition', 'attachment; filename="pedidos.csv"');
-      return csv([
+      const report = [
         ['Referência', 'Descrição', 'Centavos', 'Máximo de parcelas', 'Status', 'Criação (UTC)', 'Validade (UTC)'],
         ...rows.map(row => [row.reference, row.description, row.amount_cents, row.max_installments, labels[row.status],
           row.created_at.toISOString(), row.expires_at.toISOString()]),
-      ]);
+      ];
+      if (format === 'xlsx') {
+        const workbook = await writeExcelFile(report.map(row =>
+          row.map(value => ({ value, type: typeof value === 'number' ? Number : String }))),
+        { sheet: 'Pedidos' }).toBuffer();
+        return reply.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+          .header('Content-Disposition', 'attachment; filename="pedidos.xlsx"').send(workbook);
+      }
+      return reply.type('text/csv; charset=utf-8').header('Content-Disposition', 'attachment; filename="pedidos.csv"')
+        .send(csv(report));
     }
     const page = Number(request.query.page ?? 1);
     if (!Number.isInteger(page) || page < 1 || page > 10000) return badInput(reply, 'Página inválida.');
     const { rows } = await db.query(`SELECT *, ${state} AS status FROM orders ${where}
       ORDER BY created_at DESC, id DESC LIMIT 26 OFFSET $${args.length + 1}`, [...args, (page - 1) * 25]);
-    return { orders: rows.slice(0, 25).map(row => serialized(row, config)), page, hasNext: rows.length > 25 };
+    return { orders: rows.slice(0, 25).map(row => serialized(row, config, request.session.role !== 'viewer')), page, hasNext: rows.length > 25 };
   });
 
-  app.post('/api/admin/pedidos/:id/cancelar', authWrite, async (request, reply) => {
+  app.post('/api/admin/pedidos/:id/cancelar', orderWrite, async (request, reply) => {
     if (!uuid.test(request.params.id) || request.body?.confirm !== true) {
       return badInput(reply, 'Confirme o cancelamento do pedido.');
     }
     const canceled = await inTransaction(db, async client => {
       const { rows: [row] } = await client.query(`
-        UPDATE orders SET canceled_at = now() WHERE id = $1 AND admin_id = $2
+        UPDATE orders SET canceled_at = now() WHERE id = $1
           AND canceled_at IS NULL AND expires_at > now() RETURNING id
-      `, [request.params.id, request.session.id]);
+      `, [request.params.id]);
       if (!row) return false;
       await audit(client, request.session.id, 'pedido_cancelado', row.id);
       return true;
@@ -172,15 +197,15 @@ export function registerOrders(app, db, config, { authRead, authWrite }) {
   });
 
   app.get('/api/admin/resumo', authRead, async (request, reply) => {
-    const range = dateFilter(request.query, 2);
-    if (!range) return badInput(reply, 'Informe um período válido.');
+    const filter = orderFilter(request.query);
+    if (!filter) return badInput(reply, 'Informe um período, faixa de valor e situação válidos.');
     const { rows: [row] } = await db.query(`
       SELECT count(*)::integer AS total, coalesce(sum(amount_cents), 0)::text AS volume,
         count(*) FILTER (WHERE ${state} = 'open')::integer AS open,
         count(*) FILTER (WHERE ${state} = 'expired')::integer AS expired,
         count(*) FILTER (WHERE ${state} = 'canceled')::integer AS canceled
-      FROM orders WHERE admin_id = $1 ${range.sql}
-    `, [request.session.id, ...range.args]);
+      FROM orders ${filter.sql}
+    `, filter.args);
     return row;
   });
 }

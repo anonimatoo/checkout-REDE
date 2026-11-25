@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { measureEgress, NetworkError } from '../../connect/src/network.js';
 import { performance } from 'node:perf_hooks';
 import { MAX_CENTS, cnpjCharacters, digits, validCnpj, validEmail } from '../../shared/format.js';
 import { payment } from './config.js';
@@ -49,28 +50,11 @@ function image(value) {
 
 const fail = (reply, message) => reply.code(400).send({ code: 'SETTINGS_INPUT', message });
 
-export function egressMonitor(db, config) {
+export function egressMonitor(db, config, connect) {
   let pending;
   async function check() {
-    if (!config.egressUrl) return null;
-    const response = await fetch(config.egressUrl, {
-      headers: { accept: 'text/plain' }, redirect: 'error', signal: AbortSignal.timeout(5_000),
-    });
-    if (!response.ok || !response.body) throw new Error('Não foi possível medir o IP de saída.');
-    const reader = response.body.getReader();
-    let body = '';
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (body.length + value.length > 128) throw new Error('Resposta inválida do serviço de IP.');
-        body += Buffer.from(value).toString('utf8');
-      }
-    } finally {
-      await reader.cancel();
-    }
-    const ip = body.trim();
-    if (!isIP(ip)) throw new Error('O serviço de IP não retornou um endereço válido.');
+    if (!connect && !config.egressUrl) return null;
+    const ip = connect ? await connect.egress() : await measureEgress(config.egressUrl);
     return inTransaction(db, async client => {
       const { rows: [before] } = await client.query(
         'SELECT host(observed_egress) AS ip FROM store_settings WHERE id FOR UPDATE',
@@ -88,7 +72,8 @@ export function egressMonitor(db, config) {
   };
 }
 
-export function registerStore(app, db, config, { authRead, authWrite }, verifyEgress) {
+export function registerStore(app, db, config, { authRead, ownerRead, ownerWrite }, verifyEgress, connect) {
+  const hasProbe = Boolean(connect || config.egressUrl);
   app.get('/api/health', async (request, reply) => {
     try {
       await db.query('SELECT 1');
@@ -107,11 +92,13 @@ export function registerStore(app, db, config, { authRead, authWrite }, verifyEg
     return reply.type(head.slice(5, -7)).send(Buffer.from(bytes, 'base64'));
   });
 
-  app.get('/api/admin/configuracao', authRead, async () => ({
-    store: storePrivate(await getStore(db)), payment, egressConfigured: Boolean(config.egressUrl),
+  app.get('/api/admin/provedor', authRead, async () => ({ payment, connectConfigured: Boolean(connect) }));
+
+  app.get('/api/admin/configuracao', ownerRead, async () => ({
+    store: storePrivate(await getStore(db)), payment, egressConfigured: hasProbe, connectConfigured: Boolean(connect),
   }));
 
-  app.put('/api/admin/loja', authWrite, async (request, reply) => {
+  app.put('/api/admin/loja', ownerWrite, async (request, reply) => {
     const input = request.body ?? {};
     const name = text(input.name, 80);
     const legal = text(input.legalName, 160);
@@ -143,7 +130,7 @@ export function registerStore(app, db, config, { authRead, authWrite }, verifyEg
     return { store: storePrivate(await getStore(db)) };
   });
 
-  app.put('/api/admin/limites', authWrite, async (request, reply) => {
+  app.put('/api/admin/limites', ownerWrite, async (request, reply) => {
     const { minCents, maxCents, minInstallment, maxInstallments } = request.body ?? {};
     if (![minCents, maxCents, minInstallment, maxInstallments].every(Number.isInteger) ||
         minCents < 1 || maxCents > MAX_CENTS || minCents > maxCents ||
@@ -158,11 +145,11 @@ export function registerStore(app, db, config, { authRead, authWrite }, verifyEg
     return { store: storePrivate(await getStore(db)) };
   });
 
-  app.get('/api/admin/ip', authRead, async request => ({
-    store: storePrivate(await getStore(db)), clientIp: request.ip, probeConfigured: Boolean(config.egressUrl),
+  app.get('/api/admin/ip', ownerRead, async request => ({
+    store: storePrivate(await getStore(db)), clientIp: request.ip, probeConfigured: hasProbe, probeSource: connect ? 'connect' : 'checkout',
   }));
 
-  app.put('/api/admin/ip', authWrite, async (request, reply) => {
+  app.put('/api/admin/ip', ownerWrite, async (request, reply) => {
     const cidr = text(request.body?.cidr, 49);
     if (cidr === null || cidr && !/^[^/\s]+(?:\/\d{1,3})?$/.test(cidr)) {
       return fail(reply, 'Informe um endereço IP ou bloco CIDR válido.');
@@ -188,16 +175,18 @@ export function registerStore(app, db, config, { authRead, authWrite }, verifyEg
     return { store: storePrivate(await getStore(db)) };
   });
 
-  app.post('/api/admin/ip/verificar', authWrite, async (request, reply) => {
-    if (!config.egressUrl) return fail(reply, 'Configure o serviço de detecção do IP de saída na instalação.');
+  app.post('/api/admin/ip/verificar', ownerWrite, async (request, reply) => {
+    if (!hasProbe) return fail(reply, 'Configure o serviço de detecção do IP de saída na instalação.');
     try {
       return { store: await verifyEgress() };
-    } catch {
-      return reply.code(502).send({ code: 'EGRESS_PROBE', message: 'O serviço de detecção de IP está indisponível.' });
+    } catch (error) {
+      if (!(error instanceof NetworkError)) throw error;
+      return reply.code(error.code === 'PROBE_NOT_CONFIGURED' ? 409 : 502)
+        .send({ code: error.code, message: error.message, upstreamStatus: error.status ?? null });
     }
   });
 
-  app.get('/api/admin/auditoria', authRead, async (request, reply) => {
+  app.get('/api/admin/auditoria', ownerRead, async (request, reply) => {
     const { rows } = await db.query(`SELECT action, subject, created_at FROM audit_events
       ORDER BY id DESC LIMIT 100`);
     if (request.query.format === 'csv') {
@@ -208,7 +197,7 @@ export function registerStore(app, db, config, { authRead, authWrite }, verifyEg
     return { events: rows };
   });
 
-  app.post('/api/admin/diagnostico', authWrite, async () => {
+  app.post('/api/admin/diagnostico', ownerWrite, async () => {
     const checkedAt = new Date().toISOString();
     const tests = [];
     const add = (name, status, detail, ms = null, code = '') => tests.push({ name, status, detail, ms, code, checkedAt });
@@ -223,19 +212,32 @@ export function registerStore(app, db, config, { authRead, authWrite }, verifyEg
     } catch {
       add('PostgreSQL', 'Falhou', 'Verifique a conexão e a disponibilidade do banco.', Math.round(performance.now() - startDb), 'DB_UNAVAILABLE');
     }
-    if (config.egressUrl) {
+    if (connect) {
+      const start = performance.now();
+      try {
+        await connect.health();
+        add('CS REDE CONNECT', 'Aprovado', 'O serviço intermediário respondeu à consulta autenticada.', Math.round(performance.now() - start));
+      } catch (error) {
+        if (!(error instanceof NetworkError)) throw error;
+        add('CS REDE CONNECT', 'Falhou', error.message, Math.round(performance.now() - start), error.code);
+      }
+    } else add('CS REDE CONNECT', 'Não configurado', 'Configure a origem e o token do serviço intermediário.');
+    if (hasProbe) {
       const startIp = performance.now();
       try {
         const store = await verifyEgress();
         add('IP público de saída', 'Aprovado', store.observedEgress, Math.round(performance.now() - startIp));
         add('Comparação do CIDR', store.egressMatch === null ? 'Não configurado' : store.egressMatch ? 'Aprovado' : 'Falhou',
           store.egressMatch === null ? 'Cadastre um IP ou bloco CIDR.' : store.authorizedCidr);
-      } catch {
-        add('IP público de saída', 'Falhou', 'Verifique a conectividade com o serviço de detecção.',
-          Math.round(performance.now() - startIp), 'EGRESS_PROBE');
+      } catch (error) {
+        if (!(error instanceof NetworkError)) throw error;
+        const detail = error.status ? error.message + ' HTTP ' + error.status + '.' : error.message;
+        add('IP público de saída', error.code === 'PROBE_NOT_CONFIGURED' ? 'Não configurado' : 'Falhou',
+          detail, Math.round(performance.now() - startIp), error.code);
       }
     } else add('IP público de saída', 'Não configurado', 'Defina o serviço de detecção de IP na instalação.');
     add('Ambientes maxiPago!', 'Não suportado', 'O provedor anunciou a desativação da plataforma.', null, 'PROVIDER_RETIRED');
+    add('Ambientes Itaú Checkout', 'Não configurado', 'Aguardando acesso ao contrato técnico e ao projeto Sandbox.', null, 'PROVIDER_ONBOARDING');
     for (const name of ['Credenciais e autenticação', 'DNS e HTTPS do gateway', 'Autorização de IP', 'Tokenização e 3DS', 'Operações financeiras e webhooks']) {
       add(name, 'Não verificado', 'A verificação depende da habilitação de um provedor homologado.');
     }

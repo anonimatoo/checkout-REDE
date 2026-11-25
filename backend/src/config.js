@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { probeUrl } from '../../connect/src/network.js';
 
 const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
 
@@ -17,20 +18,30 @@ export function loadConfig(env = process.env) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT inválida.');
   const proxy = env.TRUST_PROXY_IP;
   if (proxy && !isIP(proxy)) throw new Error('TRUST_PROXY_IP precisa ser o IP do proxy reverso.');
-  const egressUrl = env.EGRESS_PROBE_URL ? new URL(env.EGRESS_PROBE_URL) : null;
-  if (egressUrl && (egressUrl.protocol !== 'https:' || egressUrl.username || egressUrl.password)) {
-    throw new Error('EGRESS_PROBE_URL precisa ser uma URL HTTPS sem credenciais.');
+  const egressUrl = probeUrl(env.EGRESS_PROBE_URL);
+  const connectUrl = env.CONNECT_URL ? new URL(env.CONNECT_URL) : null;
+  const connectToken = env.CONNECT_TOKEN;
+  if (connectUrl) {
+    const privateOrigin = connectUrl.protocol === 'http:' && (
+      loopback.has(connectUrl.hostname) && env.NODE_ENV !== 'production' ||
+      connectUrl.hostname === 'connect' && env.CONNECT_PRIVATE_HTTP === 'true'
+    );
+    if ((connectUrl.protocol !== 'https:' && !privateOrigin) || connectUrl.href !== connectUrl.origin + '/') {
+      throw new Error('Configure CONNECT_URL com a origem HTTPS do serviço intermediário.');
+    }
+    if (!/^[A-Za-z0-9_-]{43,128}$/.test(connectToken ?? '')) throw new Error('Configure o CONNECT_TOKEN compartilhado.');
   }
   return {
     databaseUrl: env.DATABASE_URL, key, origin: origin.origin, port,
     secure: origin.protocol === 'https:', host: env.APP_HOST ?? '127.0.0.1',
-    proxy, egressUrl,
+    proxy, egressUrl, connectUrl, connectToken,
   };
 }
 
 export const payment = Object.freeze({
   available: false,
-  provider: 'maxiPago!',
-  status: 'descontinuado',
+  provider: 'Itaú Checkout',
+  status: 'aguardando_contrato_tecnico',
+  portal: 'https://developer.userede.com.br/',
   announcement: 'https://www.maxipago.com/developers/',
 });

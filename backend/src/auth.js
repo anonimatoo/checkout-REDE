@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { audit, inTransaction } from './db.js';
 import { digest, hashPassword, matches, token, validPassword, validToken, verifyPassword } from './security.js';
+import { lockSetup, ownerExists } from './team.js';
 import { validEmail } from '../../shared/format.js';
 
 const cookieOptions = secure => ({
@@ -54,9 +56,9 @@ export async function registerAuth(app, db, config) {
     const raw = request.cookies[cookie];
     if (!validToken(raw)) return null;
     const { rows: [session] } = await db.query(`
-      SELECT a.id, a.email, s.digest, s.csrf, s.expires_at FROM admin_sessions s
+      SELECT a.id, a.email, a.role, s.digest, s.csrf, s.expires_at FROM admin_sessions s
       JOIN administrators a ON a.id = s.admin_id
-      WHERE s.digest = $1 AND s.expires_at > now()
+      WHERE s.digest = $1 AND s.expires_at > now() AND a.disabled_at IS NULL
     `, [digest(raw)]);
     return session ?? null;
   }
@@ -72,11 +74,22 @@ export async function registerAuth(app, db, config) {
   };
   const authRead = { preHandler: signedIn };
   const authWrite = { preHandler: [origin, signedIn, csrf] };
+  function requireRole(...roles) {
+    return async (request, reply) => {
+      if (!roles.includes(request.session.role)) {
+        return reply.code(403).send({ code: 'PERMISSION', message: 'Seu perfil não tem permissão para esta operação.' });
+      }
+    };
+  }
+  const owner = requireRole('owner');
+  const ownerRead = { preHandler: [signedIn, owner] };
+  const ownerWrite = { preHandler: [...authWrite.preHandler, owner] };
+  const orderWrite = { preHandler: [...authWrite.preHandler, requireRole('owner', 'operator')] };
   app.decorateRequest('session', null);
 
   app.get('/api/auth/session', async request => {
     const session = await findSession(request);
-    return { user: session ? { email: session.email, csrf: session.csrf, expiresAt: session.expires_at } : null };
+    return { user: session ? { email: session.email, role: session.role, csrf: session.csrf, expiresAt: session.expires_at } : null };
   });
 
   app.post('/api/auth/login', { preHandler: origin }, async (request, reply) => {
@@ -85,7 +98,10 @@ export async function registerAuth(app, db, config) {
     if (!validEmail(email) || typeof password !== 'string' || password.length > 128) return invalidCredentials(reply);
     if (await limited(request, reply, 'login')) return reply;
 
-    const { rows: [admin] } = await db.query('SELECT id, password_hash FROM administrators WHERE email = $1', [email]);
+
+    const { rows: [admin] } = await db.query(
+      'SELECT id, role, password_hash FROM administrators WHERE email = $1 AND disabled_at IS NULL', [email],
+    );
     let valid;
     if (!beginVerification(reply)) return reply;
     try {
@@ -93,7 +109,7 @@ export async function registerAuth(app, db, config) {
     } finally {
       checks--;
     }
-    if (!admin || !valid) {
+    if (!admin?.password_hash || !valid) {
       await audit(db, admin?.id ?? null, 'login_recusado');
       return invalidCredentials(reply);
     }
@@ -101,7 +117,7 @@ export async function registerAuth(app, db, config) {
     const session = token();
     const csrfToken = token();
     const created = await inTransaction(db, async client => {
-      const current = await client.query('SELECT id FROM administrators WHERE id = $1 AND password_hash = $2 FOR UPDATE',
+      const current = await client.query('SELECT id FROM administrators WHERE id = $1 AND password_hash = $2 AND disabled_at IS NULL FOR UPDATE',
         [admin.id, admin.password_hash]);
       if (!current.rowCount) return false;
       await client.query('DELETE FROM auth_limits WHERE key = $1', [digest('login:' + request.ip)]);
@@ -115,7 +131,7 @@ export async function registerAuth(app, db, config) {
     });
     if (!created) return invalidCredentials(reply);
     reply.setCookie(cookie, session, { ...cookieOptions(config.secure), maxAge: loginDuration });
-    return { user: { email, csrf: csrfToken } };
+    return { user: { email, role: admin.role, csrf: csrfToken } };
   });
 
   app.post('/api/auth/logout', authWrite, async (request, reply) => {
@@ -149,9 +165,9 @@ export async function registerAuth(app, db, config) {
     try {
       changed = await inTransaction(db, async client => {
         const { rows: [admin] } = await client.query(`
-          SELECT password_hash FROM administrators WHERE id = $1 FOR UPDATE
+          SELECT password_hash FROM administrators WHERE id = $1 AND disabled_at IS NULL FOR UPDATE
         `, [request.session.id]);
-        if (!(await verifyPassword(current, admin.password_hash))) return false;
+        if (!admin?.password_hash || !(await verifyPassword(current, admin.password_hash))) return false;
         await changePassword(client, request.session.id, await hashPassword(password), 'senha_alterada');
         return true;
       });
@@ -179,10 +195,13 @@ export async function registerAuth(app, db, config) {
     let restored;
     try {
       restored = await inTransaction(db, async client => {
-        await client.query('SELECT id FROM administrators WHERE id = $1 FOR UPDATE', [reset.admin_id]);
+        const { rows: [account] } = await client.query(
+          'SELECT password_hash FROM administrators WHERE id = $1 AND disabled_at IS NULL FOR UPDATE', [reset.admin_id],
+        );
+        if (!account) return false;
         const active = await client.query('SELECT 1 FROM reset_tokens WHERE digest = $1 AND expires_at > now()', [hash]);
         if (!active.rowCount) return false;
-        await changePassword(client, reset.admin_id, await hashPassword(password), 'senha_recuperada');
+        await changePassword(client, reset.admin_id, await hashPassword(password), account.password_hash ? 'senha_recuperada' : 'conta_ativada');
         return true;
       });
     } finally {
@@ -193,5 +212,44 @@ export async function registerAuth(app, db, config) {
     return { ok: true };
   });
 
-  return { authRead, authWrite };
+  app.get('/api/auth/setup', async () => ({ initialized: await ownerExists(db) }));
+
+  app.post('/api/auth/setup', { preHandler: origin }, async (request, reply) => {
+    const { secret, password } = request.body ?? {};
+    const email = typeof request.body?.email === 'string' ? request.body.email.trim().toLowerCase() : '';
+    if (!validPassword(password) || !validEmail(email) || !validToken(secret)) {
+      return reply.code(400).send({ code: 'SETUP_INPUT', message: 'Confira o e-mail, a senha e o link de instalação.' });
+    }
+    if (await limited(request, reply, 'setup')) return reply;
+    const unavailable = () => reply.code(409).send({ code: 'SETUP_UNAVAILABLE',
+      message: 'O link venceu, foi substituído ou a instalação já está configurada.' });
+    const tokenHash = digest(secret);
+    const activeToken = client => client.query(
+      'SELECT 1 FROM admin_setup_token WHERE digest = $1 AND expires_at > now()', [tokenHash],
+    );
+    if (!(await activeToken(db)).rowCount) return unavailable();
+    if (!beginVerification(reply)) return reply;
+    let passwordHash;
+    try {
+      passwordHash = await hashPassword(password);
+    } finally {
+      checks--;
+    }
+    const created = await inTransaction(db, async client => {
+      await lockSetup(client);
+      if (await ownerExists(client) || !(await activeToken(client)).rowCount) return false;
+      const id = randomUUID();
+      await client.query(
+        'INSERT INTO administrators (id, singleton, email, password_hash) VALUES ($1, true, $2, $3)',
+        [id, email, passwordHash],
+      );
+      await client.query('DELETE FROM admin_setup_token');
+      await audit(client, id, 'conta_criada_assistente');
+      return true;
+    });
+    if (!created) return unavailable();
+    return reply.code(201).send({ ok: true });
+  });
+
+  return { authRead, ownerRead, ownerWrite, orderWrite };
 }

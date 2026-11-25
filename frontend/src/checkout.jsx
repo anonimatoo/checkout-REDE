@@ -12,7 +12,6 @@ import { api, Field, fmtDate, Header, Loading, Message, MoneyInput, moneyValue, 
 const changes = [5_000, 10_000, 25_000, 50_000, 100_000];
 const labels = { open: 'Aberto', canceled: 'Cancelado', expired: 'Expirado' };
 const blankAddress = { street: '', number: '', complement: '', district: '', city: '', state: '' };
-const postedDate = '15/10/2026';
 
 function Stepper() {
   return <ol className="steps" aria-label="Etapas do checkout">
@@ -171,7 +170,7 @@ function installmentLabel(option) {
   return option.quantity + '× de ' + brl(option.base) + (option.extra ? ' (com ajuste de centavos)' : '');
 }
 
-function Payment({ cents, installments, selected, onSelect, closed }) {
+function Payment({ cents, installments, selected, onSelect, closed, provider }) {
   return <section className="payment-section">
     <SectionTitle icon={CreditCard}>Pagamento com cartão</SectionTitle>
     <Field label="Parcelamento" required>
@@ -183,7 +182,7 @@ function Payment({ cents, installments, selected, onSelect, closed }) {
     <div className="payment-note" aria-describedby="pay-note">
       <span className="payment-icon"><WalletCards size={22} aria-hidden="true" /></span>
       <div id="pay-note"><strong>{closed ? 'Pedido encerrado' : 'Pagamento indisponível'}</strong>
-        <p>{closed ? 'Este link já foi cancelado ou perdeu a validade.' : 'O gateway maxiPago! foi descontinuado.'}</p></div>
+        <p>{closed ? 'Este link já foi cancelado ou perdeu a validade.' : 'A integração com ' + provider + ' está pendente.'}</p></div>
     </div>
     <button className="pay-button" type="button" disabled aria-describedby="pay-note">
       <LockKeyhole size={21} /> Pagar agora <span>·</span> {brl(cents)}
@@ -377,17 +376,17 @@ function CheckoutContent({ store, payment, user, order }) {
             created={created} setCreated={setCreated} choices={choices} />
           <Summary store={store} cents={cents} reference={order?.reference ?? reference} description={order?.description ?? description}
             option={choices[selected - 1]} />
-          <div className="gateway-id"><ShieldCheck size={19} /><div><strong>Gateway previsto</strong><span>{payment.provider} · Descontinuado</span></div></div>
+          <div className="gateway-id"><ShieldCheck size={19} /><div><strong>Gateway previsto</strong><span>{payment.provider} · Integração pendente</span></div></div>
         </aside>
         <div className="surface checkout-main">
           <Stepper />
           <div className="checkout-form">
             {closed ? <Message tone="error">Pedido {labels[order.status].toLowerCase()}.</Message> : <BuyerForm />}
-            <Payment cents={cents} installments={choices} selected={selected} onSelect={setInstallments} closed={closed} />
+            <Payment provider={payment.provider} cents={cents} installments={choices} selected={selected} onSelect={setInstallments} closed={closed} />
           </div>
         </div>
       </div>
-      <div className="checkout-note"><span>Integração legada encerrada em {postedDate}.</span>
+      <div className="checkout-note"><span>Migração para o Itaú Checkout</span>
         <a target="_blank" rel="noreferrer" href={payment.announcement}>Comunicado da Rede <ArrowUpRight size={13} /></a></div>
     </main>
     <Footer store={store} />
@@ -416,5 +415,5 @@ export function Checkout({ orderToken }) {
       </div></main>
     </div>;
   }
-  return <CheckoutContent {...remote.data} user={session.data?.user} order={orderState.order} />;
+  return <CheckoutContent {...remote.data} user={session.data?.user?.role === 'viewer' ? null : session.data?.user} order={orderState.order} />;
 }

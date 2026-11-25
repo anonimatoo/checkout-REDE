@@ -379,3 +379,10 @@ td small { display: block; color: var(--muted); margin-top: 3px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+.filter-money { max-width: 11rem; }
+.login-card .form-stack + .button { margin-top: 10px; }
+.member-card { padding: 12px; border: 1px solid var(--line); border-radius: 9px; }
+.member-card summary { cursor: pointer; font-size: .9rem; }
+.member-card summary span { color: var(--muted); display: block; margin-top: 5px; }
+.member-card form { margin-top: 13px; }
